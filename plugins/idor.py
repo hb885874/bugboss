@@ -1,17 +1,17 @@
-# plugins/idor.py
+from utils.helpers import ensure_results_dir
 
-import requests
-
-def scan(target):
-    print(f"[*] Scanning {target} for IDOR vulnerabilities...")
-    test_ids = ["1", "2", "3"]
-    for test_id in test_ids:
-        url = f"{target}?id={test_id}"
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code == 200 and "user" in response.text.lower():
-                print(f"[!] Potential IDOR vulnerability detected at {url}")
-            else:
-                print(f"[-] No IDOR vulnerability detected at {url}")
-        except requests.exceptions.RequestException as e:
-            print(f"[!] Error scanning {url}: {e}")
+def run(target):
+    ensure_results_dir()
+    output_file = "results/idor_results.txt"
+    with open(output_file, "a") as f:
+        for i in range(1, 4):
+            url = f"{target}?id={i}"
+            try:
+                response = requests.get(url, timeout=5)
+                if "user" in response.text.lower() or "account" in response.text.lower():  # crude check
+                    f.write(f"[{target}] Possible IDOR at {url}\n")
+                    print(f"[!] Potential IDOR vulnerability detected at {url}")
+                else:
+                    print(f"[-] No IDOR vulnerability detected at {url}")
+            except Exception as e:
+                print(f"[!] Error checking {url}: {str(e)}")
