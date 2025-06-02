@@ -1,6 +1,11 @@
-from utils.helpers import ensure_results_dir
+import requests
+import os
 
-def run(target):
+def ensure_results_dir():
+    os.makedirs("results", exist_ok=True)
+
+def scan(target):
+    print(f"[*] Scanning {target} for IDOR vulnerabilities...")
     ensure_results_dir()
     output_file = "results/idor_results.txt"
     with open(output_file, "a") as f:
@@ -8,7 +13,7 @@ def run(target):
             url = f"{target}?id={i}"
             try:
                 response = requests.get(url, timeout=5)
-                if "user" in response.text.lower() or "account" in response.text.lower():  # crude check
+                if "user" in response.text.lower() or "account" in response.text.lower():
                     f.write(f"[{target}] Possible IDOR at {url}\n")
                     print(f"[!] Potential IDOR vulnerability detected at {url}")
                 else:
