@@ -1,22 +1,24 @@
 import requests
-import os
 
-def ensure_results_dir():
-    os.makedirs("results", exist_ok=True)
-
-def scan(target):
+def scan(target, results_dir):
     print(f"[*] Scanning {target} for IDOR vulnerabilities...")
-    ensure_results_dir()
-    output_file = "results/idor_results.txt"
-    with open(output_file, "a") as f:
-        for i in range(1, 4):
-            url = f"{target}?id={i}"
-            try:
-                response = requests.get(url, timeout=5)
-                if "user" in response.text.lower() or "account" in response.text.lower():
-                    f.write(f"[{target}] Possible IDOR at {url}\n")
-                    print(f"[!] Potential IDOR vulnerability detected at {url}")
-                else:
-                    print(f"[-] No IDOR vulnerability detected at {url}")
-            except Exception as e:
-                print(f"[!] Error checking {url}: {str(e)}")
+    idor_paths = [
+        f"{target}?id=1",
+        f"{target}?id=2",
+        f"{target}?id=3",
+        f"{target}/user/1",
+        f"{target}/user/2",
+        f"{target}/profile/1"
+    ]
+
+    for url in idor_paths:
+        try:
+            r = requests.get(url, timeout=5)
+            if r.status_code == 200 and len(r.text) > 50:
+                print(f"[!] Potential IDOR vulnerability detected at {url}")
+                with open(f"{results_dir}/idor_hits.txt", "a") as f:
+                    f.write(f"[IDOR] {url} -> Status: {r.status_code}\n")
+            else:
+                print(f"[-] No IDOR vulnerability detected at {url}")
+        except Exception as e:
+            print(f"[ERROR] {url} -> {str(e)}")

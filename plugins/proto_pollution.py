@@ -1,31 +1,24 @@
 # plugins/proto_pollution.py
 
 import requests
-import os
 
-def ensure_results_dir():
-    os.makedirs("results", exist_ok=True)
-
-def scan(target):
+def scan(target, results_dir):
     print(f"[*] Scanning {target} for prototype pollution vulnerabilities...")
-    ensure_results_dir()
-    output_file = "results/proto_pollution_results.txt"
     payloads = [
-        "__proto__[test]=true",
-        "constructor.prototype.test=123",
-        "prototype[evil]=1"
+        "?__proto__[polluted]=yes",
+        "?constructor[prototype][polluted]=yes",
+        "?prototype[polluted]=yes"
     ]
-    vulnerable = False
-    for payload in payloads:
-        url = f"{target}?{payload}"
+
+    for p in payloads:
+        url = f"{target}{p}"
         try:
-            response = requests.get(url, timeout=5)
-            if "test" in response.text.lower() or "evil" in response.text.lower():
-                with open(output_file, "a") as f:
-                    f.write(f"[{target}] Prototype pollution possible at {url}\n")
-                print(f"[!] Prototype pollution possible at {url}")
-                vulnerable = True
+            r = requests.get(url, timeout=5)
+            if "polluted" in r.text.lower():
+                print(f"[!!] Possible prototype pollution at {url}")
+                with open(f"{results_dir}/proto_pollution_hits.txt", "a") as f:
+                    f.write(f"[POLLUTION] {url}\n")
+            else:
+                print(f"[-] No prototype pollution detected at {url}")
         except Exception as e:
-            print(f"[!] Error checking {url}: {str(e)}")
-    if not vulnerable:
-        print(f"[-] No prototype pollution vulnerability detected at {target}")
+            print(f"[ERROR] {url} -> {str(e)}")
