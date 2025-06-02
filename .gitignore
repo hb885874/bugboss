@@ -192,3 +192,6 @@ results/
 # OS-specific files
 .DS_Store
 Thumbs.db
+
+# Don't commit scan outputs
+results/
