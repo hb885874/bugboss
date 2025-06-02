@@ -20,12 +20,13 @@ def main():
 
     modules = args.modules.split(',')
     targets = load_targets(args.targets)
+    os.makedirs("results", exist_ok=True)
 
     for module_name in modules:
         try:
             module = importlib.import_module(f"plugins.{module_name}")
             for target in targets:
-                module.scan(target)
+                module.scan(target, "results")
         except ModuleNotFoundError:
             print(f"[!] Module not found: {module_name}")
         except AttributeError:
