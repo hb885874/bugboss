@@ -1,90 +1,141 @@
 # plugins/proto_pollution.py
 
-import requests
-from urllib.parse import urlparse
-import difflib
 import os
 import re
+import json
+import time
+import difflib
+import requests
+from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 
-HEADERS = {
-    "User-Agent": "bugboss-scanner/1.0"
-}
+# Try importing selenium and handle gracefully if unavailable
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    SELENIUM_AVAILABLE = True
+except ModuleNotFoundError:
+    print("[!] Selenium not available. DOM-based tests will be skipped.")
+    SELENIUM_AVAILABLE = False
 
-PAYLOAD_KEY = "__proto__[isAdmin]"
-PAYLOAD_VALUE = "true"
+# Payloads for prototype pollution
+def get_payloads():
+    return [
+        {"__proto__": {"isHacked": True}},
+        {"constructor": {"prototype": {"polluted": 1}}},
+        {"__proto__": {"admin": True}}
+    ]
 
-def get_payload():
-    return {PAYLOAD_KEY: PAYLOAD_VALUE}
-
-def send_request(url, params=None):
-    try:
-        response = requests.get(url, headers=HEADERS, params=params, timeout=10)
-        return response.text
-    except Exception as e:
-        print(f"[!] Error requesting {url}: {e}")
+# Set up headless browser for DOM behavior testing
+def setup_browser():
+    if not SELENIUM_AVAILABLE:
         return None
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    return webdriver.Chrome(options=chrome_options)
 
-def highlight_reflection(html, payload_key, payload_value):
-    key_escaped = re.escape(payload_key)
-    value_escaped = re.escape(payload_value)
+# Inject payload into URL query string
+def inject_payload(base_url, payload):
+    for key, val in payload.items():
+        full_url = f"{base_url}?{key}={json.dumps(val)}"
+        yield full_url
 
-    key_hit = re.search(key_escaped, html, re.IGNORECASE)
-    value_hit = re.search(value_escaped, html, re.IGNORECASE)
+# Basic reflection check
+def is_reflected(response_text, payload):
+    for key in payload.keys():
+        if key in response_text:
+            return True, key
+    return False, None
 
-    if key_hit or value_hit:
-        return True
-    return False
+# Check DOM via headless browser
+def check_dom_effect(driver, url):
+    if not driver:
+        return False, None
+    try:
+        driver.get(url)
+        time.sleep(2)
+        dom = driver.execute_script("return document.body.innerHTML")
+        if "isHacked" in dom or "polluted" in dom or "admin" in dom:
+            return True, dom
+    except Exception:
+        return False, None
+    return False, None
 
-def generate_html_diff(base_html, polluted_html):
-    differ = difflib.HtmlDiff(tabsize=2, wrapcolumn=100)
-    diff_html = differ.make_file(
-        base_html.splitlines(),
-        polluted_html.splitlines(),
-        fromdesc='Original',
-        todesc='With Payload'
-    )
-    return diff_html
+# Analyze JS sinks
+def extract_js_sinks(session, base_url):
+    try:
+        res = session.get(base_url, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+        scripts = soup.find_all("script")
+        sink_hits = []
+        pattern = re.compile(r'(Object\\.assign|\\.extend|_.merge)\\s*\\(')
 
-def scan(url, results_dir):
-    payload = get_payload()
-    subdir = os.path.join(results_dir, "proto_pollution")
-    os.makedirs(subdir, exist_ok=True)
+        for script in scripts:
+            if script.get("src"):
+                js_url = urljoin(base_url, script["src"])
+                try:
+                    js_code = session.get(js_url, timeout=5).text
+                    for match in pattern.finditer(js_code):
+                        sink_hits.append((js_url, match.group()))
+                except:
+                    continue
+            else:
+                if script.string:
+                    for match in pattern.finditer(script.string):
+                        sink_hits.append((base_url, match.group()))
+        return sink_hits
+    except Exception:
+        return []
 
-    print(f"[*] Scanning {url} for prototype pollution vulnerabilities...")
+# Save report as markdown
+def save_markdown_report(report_lines, output_file):
+    with open(output_file, "w") as f:
+        f.write("\n".join(report_lines))
 
-    base_html = send_request(url)
-    polluted_html = send_request(url, payload)
+# Main scanner logic
+def scan(target, results_dir):
+    session = requests.Session()
+    driver = setup_browser()
+    payloads = get_payloads()
+    report = [f"# Prototype Pollution Scan Report for {target}\n"]
+    hit_count = 0
 
-    if not base_html or not polluted_html:
-        print(f"[!] Skipping {url} due to request failure.")
-        return
+    for payload in payloads:
+        for test_url in inject_payload(target, payload):
+            try:
+                print(f"[+] Testing: {test_url}")
+                r = session.get(test_url, timeout=10)
+                reflected, key = is_reflected(r.text, payload)
+                dom_effect, dom_snapshot = check_dom_effect(driver, test_url)
+                sinks = extract_js_sinks(session, target)
 
-    domain = urlparse(url).netloc.replace(':', '_')
+                if reflected or dom_effect or sinks:
+                    hit_count += 1
+                    report.append(f"## Finding {hit_count}")
+                    report.append(f"**Tested URL**: `{test_url}`")
+                    report.append(f"**Reflected**: `{reflected}` ({key})")
+                    report.append(f"**DOM Mutation**: `{dom_effect}`")
+                    if dom_snapshot:
+                        dom_file = os.path.join(results_dir, f"dom_snapshot_{hit_count}.html")
+                        with open(dom_file, "w") as f:
+                            f.write(dom_snapshot)
+                        report.append(f"**DOM Snapshot Saved**: `{dom_file}`")
+                    if sinks:
+                        report.append("**Sink Matches in JS**:")
+                        for js_url, match in sinks:
+                            report.append(f"- `{match}` in `{js_url}`")
+                    report.append("\n")
+            except Exception as e:
+                print(f"[-] Error: {e}")
+                continue
 
-    reflected = highlight_reflection(polluted_html, PAYLOAD_KEY, PAYLOAD_VALUE)
-    diffs = list(difflib.unified_diff(base_html.splitlines(), polluted_html.splitlines(), lineterm=""))
-
-    if reflected or diffs:
-        print(f"[!!] Potential prototype pollution behavior detected at {url}")
-
-        with open(os.path.join(subdir, f"{domain}_base.html"), "w") as f:
-            f.write(base_html)
-
-        with open(os.path.join(subdir, f"{domain}_polluted.html"), "w") as f:
-            f.write(polluted_html)
-
-        with open(os.path.join(subdir, "proto_pollution_hits.txt"), "a") as f:
-            f.write(f"[!!] {url}\n")
-            if reflected:
-                f.write("[*] Reflected payload detected!\n")
-            if diffs:
-                f.write("[*] Response content differs\n")
-            f.write("\n")
-
-        # Generate HTML diff
-        diff_html = generate_html_diff(base_html, polluted_html)
-        with open(os.path.join(subdir, f"{domain}_diff.html"), "w") as f:
-            f.write(diff_html)
+    if driver:
+        driver.quit()
+    if hit_count == 0:
+        print("[-] No vulnerabilities detected.")
     else:
-        print(f"[-] No prototype pollution signs at {url}")
+        out_file = os.path.join(results_dir, "proto_pollution_report.md")
+        save_markdown_report(report, out_file)
+        print(f"[+] Report saved to: {out_file}")
