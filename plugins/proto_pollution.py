@@ -7,8 +7,14 @@ import time
 import difflib
 import requests
 from urllib.parse import urlparse, urljoin
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+except ModuleNotFoundError:
+    webdriver = None
+    Options = None
+
 from bs4 import BeautifulSoup
 
 # Expanded Payloads for prototype pollution
@@ -26,6 +32,9 @@ def get_payloads():
 
 # Set up headless browser for DOM behavior testing
 def setup_browser():
+    if not webdriver or not Options:
+        print("[!] Selenium not available. Skipping browser-based tests.")
+        return None
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
@@ -58,6 +67,8 @@ def is_reflected(response_text, payload):
 
 # DOM check for mutation and prototype pollution validation
 def check_dom_effect(driver, url):
+    if not driver:
+        return False, None
     try:
         driver.get(url)
         time.sleep(2)
@@ -212,7 +223,8 @@ def scan(target, results_dir):
         except Exception as e:
             print(f"[-] Error in POST test: {e}")
 
-    driver.quit()
+    if driver:
+        driver.quit()
     if hit_count == 0:
         print("[-] No vulnerabilities detected.")
     else:
